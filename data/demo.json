@@ -1,0 +1,47 @@
+{
+  "description": "Вымышленные товары, продажи и расходы для учебного проекта. Все суммы в рублях; это не данные настоящего магазина или API Wildberries.",
+  "marketplace": "wildberries",
+  "period": {"from": "2026-10-01", "to": "2026-10-14"},
+  "products": [
+    {"sku": "WB-DEMO-001", "name": "Электрический чайник «Утро»", "price": 2190, "cost": 1020, "stock": 44},
+    {"sku": "WB-DEMO-002", "name": "Блендер «Лист»", "price": 3290, "cost": 1600, "stock": 23},
+    {"sku": "WB-DEMO-003", "name": "Настольная лампа «Луч»", "price": 1490, "cost": 550, "stock": 61},
+    {"sku": "WB-DEMO-004", "name": "Увлажнитель «Туман»", "price": 2790, "cost": 1280, "stock": 32},
+    {"sku": "WB-DEMO-005", "name": "Тостер «Хруст»", "price": 2490, "cost": 1150, "stock": 28},
+    {"sku": "WB-DEMO-006", "name": "Кухонные весы «Грамм»", "price": 990, "cost": 350, "stock": 85}
+  ],
+  "sales": [
+    {"date": "2026-10-01", "sku": "WB-DEMO-001", "quantity": 3},
+    {"date": "2026-10-01", "sku": "WB-DEMO-003", "quantity": 4},
+    {"date": "2026-10-02", "sku": "WB-DEMO-002", "quantity": 2},
+    {"date": "2026-10-02", "sku": "WB-DEMO-006", "quantity": 5},
+    {"date": "2026-10-03", "sku": "WB-DEMO-004", "quantity": 3},
+    {"date": "2026-10-03", "sku": "WB-DEMO-005", "quantity": 2},
+    {"date": "2026-10-04", "sku": "WB-DEMO-001", "quantity": 4},
+    {"date": "2026-10-04", "sku": "WB-DEMO-006", "quantity": 6},
+    {"date": "2026-10-05", "sku": "WB-DEMO-002", "quantity": 3},
+    {"date": "2026-10-05", "sku": "WB-DEMO-003", "quantity": 5},
+    {"date": "2026-10-06", "sku": "WB-DEMO-004", "quantity": 2},
+    {"date": "2026-10-06", "sku": "WB-DEMO-005", "quantity": 3},
+    {"date": "2026-10-07", "sku": "WB-DEMO-001", "quantity": 5},
+    {"date": "2026-10-07", "sku": "WB-DEMO-003", "quantity": 4},
+    {"date": "2026-10-08", "sku": "WB-DEMO-002", "quantity": 2},
+    {"date": "2026-10-08", "sku": "WB-DEMO-006", "quantity": 7},
+    {"date": "2026-10-09", "sku": "WB-DEMO-004", "quantity": 4},
+    {"date": "2026-10-09", "sku": "WB-DEMO-005", "quantity": 3},
+    {"date": "2026-10-10", "sku": "WB-DEMO-001", "quantity": 6},
+    {"date": "2026-10-10", "sku": "WB-DEMO-006", "quantity": 8},
+    {"date": "2026-10-11", "sku": "WB-DEMO-002", "quantity": 4},
+    {"date": "2026-10-11", "sku": "WB-DEMO-003", "quantity": 6},
+    {"date": "2026-10-12", "sku": "WB-DEMO-004", "quantity": 3},
+    {"date": "2026-10-12", "sku": "WB-DEMO-005", "quantity": 4},
+    {"date": "2026-10-13", "sku": "WB-DEMO-001", "quantity": 4},
+    {"date": "2026-10-13", "sku": "WB-DEMO-003", "quantity": 5},
+    {"date": "2026-10-14", "sku": "WB-DEMO-002", "quantity": 3},
+    {"date": "2026-10-14", "sku": "WB-DEMO-006", "quantity": 6}
+  ],
+  "expenses": [
+    {"id": "demo-advertising-001", "date": "2026-10-03", "category": "Реклама", "amount": 2100, "comment": "Демонстрационная рекламная кампания"},
+    {"id": "demo-packaging-002", "date": "2026-10-09", "category": "Упаковка", "amount": 450, "comment": "Демонстрационная партия упаковки"}
+  ]
+}

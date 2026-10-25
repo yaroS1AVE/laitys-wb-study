@@ -525,5 +525,11 @@ async function navigate() {
 }
 
 window.addEventListener("hashchange", navigate);
+api("/health").then(data => {
+  const shopName = typeof data?.shop_name === "string" ? data.shop_name.trim() : "";
+  if (!shopName) return;
+  $("#shop-name").textContent = shopName;
+  $("#breadcrumb-shop").textContent = shopName;
+}).catch(() => {});
 api("/version").then(data => { $("#app-version").textContent = `Study Edition · v${data.version}`; }).catch(() => {});
 navigate();

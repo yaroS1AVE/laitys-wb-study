@@ -1,7 +1,7 @@
 """HTTP checks for the standalone, synthetic Wildberries study project.
 
 Every test uses its own PostgreSQL schema in LAITYS_TEST_DATABASE_URL. These
-tests never request marketplace APIs or use the working LAITYS service.
+tests keep their data isolated from other application instances.
 """
 
 import csv

@@ -2,26 +2,24 @@
 
 import csv
 import io
-import json
 import logging
 import os
-import threading
 from contextlib import asynccontextmanager
 from datetime import date as Date
 from decimal import Decimal, ROUND_HALF_UP
 from math import isfinite
 from pathlib import Path
 from time import perf_counter
-from typing import Literal
-from uuid import uuid4
 
+import psycopg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+
+from database import ExpenseInput, PostgresStore, cents, rubles
 
 PROJECT = Path(__file__).resolve().parent
 VERSION = "1.0.0"
@@ -29,94 +27,13 @@ PERIOD_FROM, PERIOD_TO = Date(2026, 10, 1), Date(2026, 10, 14)
 logger = logging.getLogger("laitys")
 
 
-def cents(value: int | float | str | Decimal) -> int:
-    """Внутри расчётов деньги хранятся в целых копейках."""
-    return int((Decimal(str(value)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-
-
-def rubles(value: int) -> float:
-    return float(Decimal(value) / 100)
-
-
 def margin(profit: int, revenue: int) -> float:
     return float((Decimal(profit) * 100 / revenue).quantize(Decimal("0.01"))) if revenue else 0.0
 
 
-class ExpenseInput(BaseModel):
-    date: Date
-    category: Literal["Реклама", "Упаковка", "Доставка", "Прочее"]
-    amount: Decimal = Field(gt=0, le=Decimal("1000000"), decimal_places=2)
-    comment: str = Field(default="", max_length=200)
-
-
-def expense_record(expense: ExpenseInput, expense_id: str) -> dict:
-    return {"id": expense_id, "date": expense.date.isoformat(),
-            "category": expense.category, "amount": float(expense.amount),
-            "comment": expense.comment}
-
-
-class DemoStore:
-    """Неизменяемая демобаза и отдельный файл редактируемых расходов."""
-
-    def __init__(self, directory: Path):
-        self.directory = directory
-        self.expenses_path = directory / "expenses.json"
-        self.lock = threading.RLock()
-        self.seed: dict | None = None
-
-    def initialize(self) -> None:
-        with self.lock:
-            self.seed = json.loads((PROJECT / "data" / "demo.json").read_text(encoding="utf-8"))
-            self.directory.mkdir(parents=True, exist_ok=True)
-            if not self.expenses_path.exists():
-                self._write(self.seed["expenses"])
-            self.read_expenses()  # Не запускать приложение с повреждённым хранилищем.
-
-    def read_expenses(self) -> list[dict]:
-        with self.lock:
-            if self.seed is None:
-                raise RuntimeError("Storage is not initialized")
-            records = json.loads(self.expenses_path.read_text(encoding="utf-8"))
-            if not isinstance(records, list):
-                raise ValueError("Expected expense list")
-            result = []
-            for row in records:
-                if not isinstance(row, dict) or not isinstance(row.get("id"), str):
-                    raise ValueError("Invalid expense record")
-                result.append(expense_record(ExpenseInput(**row), row["id"]))
-            return sorted(result, key=lambda row: (row["date"], row["id"]), reverse=True)
-
-    def _write(self, records: list[dict]) -> None:
-        temporary = self.directory / f".expenses-{uuid4().hex}.tmp"
-        try:
-            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-                json.dump(records, handle, ensure_ascii=False, indent=2, allow_nan=False)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.replace(self.expenses_path)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-    def add_expense(self, expense: ExpenseInput) -> dict:
-        with self.lock:
-            records = self.read_expenses()
-            item = expense_record(expense, uuid4().hex)
-            self._write([*records, item])
-            return item
-
-    def delete_expense(self, expense_id: str) -> bool:
-        with self.lock:
-            records = self.read_expenses()
-            remaining = [item for item in records if item["id"] != expense_id]
-            if len(records) == len(remaining):
-                return False
-            self._write(remaining)
-            return True
-
-
-def create_app(data_dir: Path | None = None) -> FastAPI:
-    """Фабрика приложения; отдельный каталог позволяет изолировать тесты."""
+def create_app(data_dir: Path | None = None, database_url: str | None = None,
+               database_schema: str = "public") -> FastAPI:
+    """data_dir указывает на прежний JSON; тесты изолируются схемой PostgreSQL."""
     load_dotenv(PROJECT / ".env")
     shop_name = os.getenv("LAITYS_SHOP_NAME", "LAITYS · учебный магазин")
     configured_dir = Path(data_dir) if data_dir is not None else Path(os.getenv("LAITYS_DATA_DIR", ".runtime"))
@@ -125,12 +42,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     log_level = level if level in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"} else "INFO"
     logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     logger.setLevel(log_level)
-    store = DemoStore(runtime_dir)
+    configured_url = database_url if database_url is not None else os.getenv("LAITYS_DATABASE_URL")
+    store = PostgresStore(runtime_dir, configured_url, database_schema)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         store.initialize()
-        logger.info("startup version=%s marketplace=wildberries mode=demo", VERSION)
+        logger.info("startup version=%s marketplace=wildberries mode=demo database=postgresql", VERSION)
         try:
             yield
         finally:
@@ -164,26 +82,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def storage_call(operation, *args):
         try:
             return operation(*args)
-        except (OSError, ValueError, TypeError, RuntimeError):
+        except (psycopg.Error, OSError, ValueError, TypeError, RuntimeError):
             logger.error("storage result=unavailable")
             raise HTTPException(status_code=503, detail="Хранилище временно недоступно") from None
 
-    def seed() -> dict:
-        if store.seed is None:
-            raise HTTPException(status_code=503, detail="Приложение ещё не запущено")
-        return store.seed
-
     def sale_amounts(sale: dict, products: dict) -> dict:
         product, units = products[sale["sku"]], sale["quantity"]
-        revenue = cents(product["price"]) * units
+        revenue = product["price_cents"] * units
         commission = int((Decimal(revenue) * Decimal("0.20")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-        logistics, cost = 3500 * units, cents(product["cost"]) * units
+        logistics, cost = 3500 * units, product["cost_cents"] * units
         return {"units": units, "revenue": revenue, "commission": commission,
                 "logistics": logistics, "cost": cost,
                 "profit": revenue - commission - logistics - cost}
 
     def product_items() -> list[dict]:
-        demo = seed()
+        demo = storage_call(store.read_catalog)
         products = {product["sku"]: product for product in demo["products"]}
         totals = {sku: {"units": 0, "revenue": 0, "profit": 0} for sku in products}
         for sale in demo["sales"]:
@@ -193,7 +106,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         result = []
         for sku, product in products.items():
             values = totals[sku]
-            result.append({**product, "units_sold": values["units"],
+            result.append({"sku": sku, "name": product["name"], "stock": product["stock"],
+                           "price": rubles(product["price_cents"]), "cost": rubles(product["cost_cents"]),
+                           "units_sold": values["units"],
                            "revenue": rubles(values["revenue"]), "profit": rubles(values["profit"]),
                            "margin": margin(values["profit"], values["revenue"])})
         return result
@@ -201,7 +116,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def build_report(date_from: Date, date_to: Date) -> dict:
         if date_from > date_to:
             raise HTTPException(status_code=400, detail="Начало периода должно быть не позже окончания")
-        demo = seed()
+        demo = storage_call(store.snapshot)
         products = {product["sku"]: product for product in demo["products"]}
         totals = dict.fromkeys(("units", "revenue", "commission", "logistics", "cost", "expenses", "profit"), 0)
         daily: dict[str, dict] = {}
@@ -215,7 +130,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 row = daily.setdefault(day, {"revenue": 0, "profit": 0})
                 row["revenue"] += values["revenue"]
                 row["profit"] += values["profit"]
-        for expense in storage_call(store.read_expenses):
+        for expense in demo["expenses"]:
             day = expense["date"]
             if start <= day <= end:
                 amount = cents(expense["amount"])
@@ -234,8 +149,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @application.get("/health")
     def health() -> dict:
-        storage_call(store.read_expenses)
-        return {"status": "ok", "marketplace": "wildberries", "shop_name": shop_name, "mode": "demo"}
+        storage_call(store.check_health)
+        return {"status": "ok", "marketplace": "wildberries", "shop_name": shop_name,
+                "mode": "demo", "database": "postgresql"}
 
     @application.get("/version")
     def version() -> dict:

@@ -1,18 +1,16 @@
 """HTTP checks for the standalone, synthetic Wildberries study project.
 
-Every application uses its own temporary directory. These tests never request
-marketplace APIs or use the working LAITYS service and its private database.
+Every test uses its own PostgreSQL schema in LAITYS_TEST_DATABASE_URL. These
+tests never request marketplace APIs or use the working LAITYS service.
 """
 
 import csv
 import io
+import json
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-
-from app_final import create_app
-
 
 def money(value):
     """Compare rubles as decimals, without introducing float arithmetic."""
@@ -20,8 +18,8 @@ def money(value):
 
 
 @pytest.fixture
-def client(tmp_path):
-    with TestClient(create_app(data_dir=tmp_path)) as test_client:
+def client(app_factory):
+    with TestClient(app_factory()) as test_client:
         yield test_client
 
 
@@ -32,6 +30,7 @@ def test_health_reports_demo_mode_and_shop(client):
     assert body["status"] == "ok"
     assert body["marketplace"] == "wildberries"
     assert body["mode"] == "demo"
+    assert body["database"] == "postgresql"
     assert isinstance(body["shop_name"], str) and body["shop_name"].strip()
 
 
@@ -98,6 +97,9 @@ def test_report_totals_reconcile_with_daily_values_and_costs(client):
     assert body["marketplace"] == "wildberries"
     assert body["period"] == {"from": "2026-10-01", "to": "2026-10-14"}
     totals = body["totals"]
+    assert totals == {"units": 116, "revenue": 225040.0, "commission": 45008.0,
+                      "logistics": 4060.0, "cost": 98400.0, "expenses": 2550.0,
+                      "profit": 75022.0, "margin": 33.34}
     assert totals["units"] > 0
     assert money(totals["revenue"]) > 0
     assert money(totals["profit"]) == (
@@ -143,10 +145,10 @@ def test_period_without_data_has_zero_totals(client):
     assert all(money(value) == 0 for value in body["totals"].values())
 
 
-def test_expense_changes_profit_and_persists_after_restart(tmp_path):
+def test_expense_changes_profit_and_persists_after_restart(app_factory):
     payload = {"date": "2026-10-05", "category": "Прочее", "amount": "123.45",
                "comment": "Учебный расход для проверки сохранения"}
-    with TestClient(create_app(data_dir=tmp_path)) as first_client:
+    with TestClient(app_factory()) as first_client:
         before = first_client.get("/api/report").json()["totals"]
         response = first_client.post("/api/expenses", json=payload)
         assert response.status_code == 201
@@ -158,7 +160,7 @@ def test_expense_changes_profit_and_persists_after_restart(tmp_path):
         assert money(after["expenses"]) - money(before["expenses"]) == Decimal("123.45")
         assert money(before["profit"]) - money(after["profit"]) == Decimal("123.45")
 
-    with TestClient(create_app(data_dir=tmp_path)) as second_client:
+    with TestClient(app_factory()) as second_client:
         saved = second_client.get("/api/expenses").json()
         assert saved["total"] == len(saved["items"])
         assert any(item["id"] == expense["id"] for item in saved["items"])
@@ -166,7 +168,7 @@ def test_expense_changes_profit_and_persists_after_restart(tmp_path):
         assert second_client.delete(f"/api/expenses/{expense['id']}").status_code == 204
         assert second_client.get("/api/report").json()["totals"] == before
 
-    with TestClient(create_app(data_dir=tmp_path)) as third_client:
+    with TestClient(app_factory()) as third_client:
         assert all(item["id"] != expense["id"] for item in third_client.get("/api/expenses").json()["items"])
         assert third_client.delete(f"/api/expenses/{expense['id']}").status_code == 404
 
@@ -183,10 +185,9 @@ def test_invalid_expense_amount_does_not_change_expenses(client, amount):
 
 
 @pytest.mark.parametrize("amount_literal", ["1e309", "-1e309", "1e999999", "NaN", "Infinity", "-Infinity"])
-def test_nonfinite_expense_numbers_return_validation_errors_without_writes(client, tmp_path, amount_literal):
+def test_nonfinite_expense_numbers_return_validation_errors_without_writes(client, db_connection, amount_literal):
     # Send raw tokens: HTTP clients reject these values before sending json=.
-    expenses_file = tmp_path / "expenses.json"
-    saved = expenses_file.read_bytes()
+    saved = db_connection.execute("SELECT * FROM expenses ORDER BY id").fetchall()
     payload = ('{"date":"2026-10-05","category":"Прочее","amount":'
                + amount_literal + ',"comment":"Неверная сумма"}')
     response = client.post("/api/expenses", content=payload.encode("utf-8"),
@@ -196,7 +197,7 @@ def test_nonfinite_expense_numbers_return_validation_errors_without_writes(clien
     assert error["loc"] == ["body", "amount"]
     assert error["type"] == "finite_number"
     assert error["msg"]
-    assert expenses_file.read_bytes() == saved
+    assert db_connection.execute("SELECT * FROM expenses ORDER BY id").fetchall() == saved
     assert client.get("/health").status_code == 200
 
 
@@ -239,27 +240,28 @@ def test_expense_outside_report_period_does_not_change_profit(client):
     assert client.get("/api/report").json()["totals"] == before
 
 
-def test_shop_name_can_be_configured_from_environment(monkeypatch, tmp_path):
+def test_shop_name_can_be_configured_from_environment(monkeypatch, app_factory):
     monkeypatch.setenv("LAITYS_SHOP_NAME", "Учебный магазин WB")
-    with TestClient(create_app(data_dir=tmp_path)) as configured_client:
+    with TestClient(app_factory()) as configured_client:
         assert configured_client.get("/health").json()["shop_name"] == "Учебный магазин WB"
 
 
-def test_environment_data_directory_is_used_and_explicit_path_takes_priority(monkeypatch, tmp_path):
+def test_environment_data_directory_is_used_and_explicit_path_takes_priority(monkeypatch, tmp_path, app_factory, schema_factory):
     environment_dir = tmp_path / "configured-by-env"
     explicit_dir = tmp_path / "configured-by-argument"
     monkeypatch.setenv("LAITYS_DATA_DIR", str(environment_dir))
-    payload = {"date": "2026-10-05", "category": "Доставка", "amount": "25.00", "comment": "ENV isolation"}
-    with TestClient(create_app()) as environment_client:
-        response = environment_client.post("/api/expenses", json=payload)
-        assert response.status_code == 201
-        identifier = response.json()["id"]
-    with TestClient(create_app()) as reloaded_client:
-        assert any(item["id"] == identifier for item in reloaded_client.get("/api/expenses").json()["items"])
-    with TestClient(create_app(data_dir=explicit_dir)) as explicit_client:
-        assert not any(item["id"] == identifier for item in explicit_client.get("/api/expenses").json()["items"])
-    assert environment_dir.is_dir()
-    assert explicit_dir.is_dir()
+    environment_dir.mkdir()
+    explicit_dir.mkdir()
+    record = {"id": "legacy-env", "date": "2026-10-05", "category": "Доставка",
+              "amount": "25.00", "comment": "ENV isolation"}
+    (environment_dir / "expenses.json").write_text(json.dumps([record]), encoding="utf-8")
+    (explicit_dir / "expenses.json").write_text("[]", encoding="utf-8")
+    with TestClient(app_factory(data_dir=None)) as environment_client:
+        assert [item["id"] for item in environment_client.get("/api/expenses").json()["items"]] == ["legacy-env"]
+    with TestClient(app_factory(data_dir=None)) as reloaded_client:
+        assert [item["id"] for item in reloaded_client.get("/api/expenses").json()["items"]] == ["legacy-env"]
+    with TestClient(app_factory(data_dir=explicit_dir, database_schema=schema_factory())) as explicit_client:
+        assert explicit_client.get("/api/expenses").json() == {"items": [], "total": 0}
 
 
 def test_export_is_csv_with_utf8_bom(client):

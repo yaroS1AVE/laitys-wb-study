@@ -49,6 +49,7 @@ jobs:
             requirements.txt
             requirements-dev.txt
             README.md
+            project_passport.md
             Запустить.cmd
             .env.example
           include-hidden-files: true

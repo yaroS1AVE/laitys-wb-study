@@ -129,6 +129,10 @@ def test_reversed_report_dates_are_rejected(client):
 def test_invalid_report_date_is_rejected(client, invalid_date):
     response = client.get("/api/report", params={"date_from": invalid_date})
     assert response.status_code == 422
+    error = response.json()["detail"][0]
+    assert error["loc"] == ["query", "date_from"]
+    assert error["type"] and error["msg"]
+    assert error["input"] == invalid_date
 
 
 def test_period_without_data_has_zero_totals(client):
@@ -167,7 +171,7 @@ def test_expense_changes_profit_and_persists_after_restart(tmp_path):
         assert third_client.delete(f"/api/expenses/{expense['id']}").status_code == 404
 
 
-@pytest.mark.parametrize("amount", [0, -1, "1000000.01", "1.234"])
+@pytest.mark.parametrize("amount", [0, -1, "1000000.01", "1.234", "NaN", "Infinity", "not-money"])
 def test_invalid_expense_amount_does_not_change_expenses(client, amount):
     before = client.get("/api/expenses").json()
     response = client.post("/api/expenses", json={
@@ -178,13 +182,52 @@ def test_invalid_expense_amount_does_not_change_expenses(client, amount):
     assert client.get("/api/expenses").json() == before
 
 
+@pytest.mark.parametrize("amount_literal", ["1e309", "-1e309", "1e999999", "NaN", "Infinity", "-Infinity"])
+def test_nonfinite_expense_numbers_return_validation_errors_without_writes(client, tmp_path, amount_literal):
+    # Send raw tokens: HTTP clients reject these values before sending json=.
+    expenses_file = tmp_path / "expenses.json"
+    saved = expenses_file.read_bytes()
+    payload = ('{"date":"2026-10-05","category":"Прочее","amount":'
+               + amount_literal + ',"comment":"Неверная сумма"}')
+    response = client.post("/api/expenses", content=payload.encode("utf-8"),
+                           headers={"Content-Type": "application/json"})
+    assert response.status_code == 422
+    error = response.json()["detail"][0]
+    assert error["loc"] == ["body", "amount"]
+    assert error["type"] == "finite_number"
+    assert error["msg"]
+    assert expenses_file.read_bytes() == saved
+    assert client.get("/health").status_code == 200
+
+
+def test_one_kopeck_expense_is_accepted_and_subtracted_exactly_once(client):
+    before = client.get("/api/report").json()["totals"]
+    response = client.post("/api/expenses", json={
+        "date": "2026-10-05", "category": "Прочее", "amount": "0.01", "comment": "Одна копейка",
+    })
+    assert response.status_code == 201
+    assert money(response.json()["amount"]) == Decimal("0.01")
+    saved = client.get("/api/expenses").json()["items"]
+    assert any(item["id"] == response.json()["id"] and money(item["amount"]) == Decimal("0.01")
+               for item in saved)
+    after = client.get("/api/report").json()["totals"]
+    assert money(after["expenses"]) - money(before["expenses"]) == Decimal("0.01")
+    assert money(before["profit"]) - money(after["profit"]) == Decimal("0.01")
+
+
 @pytest.mark.parametrize("change", [
     {"date": "2026-02-30"}, {"category": "Несуществующая категория"}, {"comment": "x" * 201},
 ])
 def test_invalid_expense_fields_are_rejected(client, change):
     payload = {"date": "2026-10-05", "category": "Реклама", "amount": "100.00", "comment": ""}
     payload.update(change)
-    assert client.post("/api/expenses", json=payload).status_code == 422
+    response = client.post("/api/expenses", json=payload)
+    assert response.status_code == 422
+    field, value = next(iter(change.items()))
+    error = response.json()["detail"][0]
+    assert error["loc"] == ["body", field]
+    assert error["type"] and error["msg"]
+    assert error["input"] == value
 
 
 def test_expense_outside_report_period_does_not_change_profit(client):

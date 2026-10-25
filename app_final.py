@@ -9,6 +9,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import date as Date
 from decimal import Decimal, ROUND_HALF_UP
+from math import isfinite
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
@@ -16,7 +17,9 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -138,6 +141,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     application.state.shop_name = shop_name
     application.state.storage = store
     application.mount("/static", StaticFiles(directory=PROJECT / "static", check_dir=False), name="static")
+
+    @application.exception_handler(RequestValidationError)
+    async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        # Переполнение числа даёт inf; даже ответ об ошибке должен быть корректным JSON.
+        errors = jsonable_encoder(exc.errors(), custom_encoder={
+            float: lambda value: value if isfinite(value) else str(value),
+        })
+        return JSONResponse(status_code=422, content={"detail": errors})
 
     @application.middleware("http")
     async def request_log(request: Request, call_next):
